@@ -1,28 +1,45 @@
-# PCAP 分析器 - 开发文档
+# PCAP 分析器
 
-## 项目简介
-简单的命令行 PCAP 包解析工具。
+简单的命令行 PCAP 包解析工具（开发中）
 
-## 技术选型
-- 编程语言：C
-- 依赖库：Npcap SDK
-- 构建工具：Makefile
+## 目录结构说明
 
-## 计划实现的功能
-1. 读取并解析 pcap 文件
-2. 支持解析：以太网、IP、TCP、UDP、ICMP
-3. 输出包信息：No., Time, Source, Destination, Protocol, Length, Info
-4. 支持按协议、IP、端口筛选
-5. 交互式查看，支持翻页
-
-## 目录结构规划
 ```
-final/
-├── src/
-│   ├── main.c          # 入口
-│   ├── pcap_reader.h/c # pcap 读取
-│   ├── packet_parser.h/c # 包解析
-│   └── filter.h/c     # 筛选
-├── Makefile
-└── README.md
+original/
+├── 开发文档.md          # 项目规划
+├── Makefile             # 构建脚本
+├── README.md            # 你在看的文件
+└── src/
+    ├── main.c           # 程序入口，处理参数
+    ├── packet_parser.h  # 数据包解析模块（头文件）
+    ├── packet_parser.c  # 数据包解析模块（实现）
+    ├── filter.h         # 筛选模块（头文件）
+    ├── filter.c         # 筛选模块（实现）
+    ├── pcap_reader.h    # pcap 文件读取（头文件）
+    └── pcap_reader.c    # pcap 文件读取（实现）
 ```
+
+## 模块作用与协作流程
+
+整体流程：
+
+```
+main.c 
+  ↓ 调用
+pcap_reader.c  ← 读取 pcap 文件
+  ↓ 解析每个包时调用
+packet_parser.c  ← 把二进制包解析成 PacketInfo
+  ↓ 判断是否显示时调用
+filter.c  ← 检查是否匹配筛选条件
+```
+
+### 各个文件的具体作用
+
+| 文件                  | 作用                                                         |
+| --------------------- | ------------------------------------------------------------ |
+| **main.c**            | 入口：解析命令行参数（比如 pcap 文件名），初始化筛选配置，调用 pcap_reader，最后进入交互查看 |
+| **packet_parser.h/c** | 解析器：负责把原始以太网/IP/TCP/UDP/ICMP 二进制数据解析成人能看懂的信息（源IP、目的IP、端口、协议等） |
+| **filter.h/c**        | 筛选器：拿着解析好的 PacketInfo，判断这个包是否符合用户想要看的条件（比如只看 TCP、只看某个 IP），符合就返回 1，不符合就返回 0 |
+| **pcap_reader.h/c**   | 读取器：负责打开 pcap 文件，扫描一遍建立索引，然后按页读取并显示，里面会调用 packet_parser 解析包，调用 filter 判断要不要显示 |
+| **Makefile**          | 集成编译                                                 |
+
