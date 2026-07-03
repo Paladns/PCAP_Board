@@ -4,7 +4,9 @@
 #include "packet_parser.h"
 #include "filter.h"
 
-typedef struct PcapContext PcapContext;
+// 前向声明
+struct PcapContextInternal;
+typedef struct PcapContextInternal PcapContext;
 
 /**
  * 创建 pcap 读取上下文

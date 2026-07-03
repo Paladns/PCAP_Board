@@ -2,6 +2,7 @@
 #define PACKET_PARSER_H
 
 #include <stdint.h>
+#include <pcap.h>
 
 /**
  * 存储解析后的数据包基本信息
