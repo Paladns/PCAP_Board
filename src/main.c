@@ -7,26 +7,75 @@
 #include "pcap_reader.h"
 #include "filter.h"
 
-// 显示帮助信息
-void print_help(const char *prog_name) {
-    printf("用法: %s -f <pcap文件> [选项]\n\n", prog_name);
-    printf("选项:\n");
-    printf("  -f <文件>     指定 pcap 文件（必需）\n");
-    printf("  -tcp          只显示 TCP 数据包\n");
-    printf("  -udp          只显示 UDP 数据包\n");
-    printf("  -icmp         只显示 ICMP 数据包\n");
-    printf("  -src <IP>     筛选源 IP 地址\n");
-    printf("  -dst <IP>     筛选目的 IP 地址\n");
-    printf("  -sport <port> 筛选源端口\n");
-    printf("  -dport <port> 筛选目的端口\n");
-    printf("  -port <port>  筛选任意方向的端口\n");
-    printf("  -size <num>   每页显示数量（默认 20）\n");
-    printf("  -h            显示帮助信息\n");
-    printf("\n交互式操作:\n");
-    printf("  n / 空格      下一页\n");
-    printf("  p             上一页\n");
-    printf("  [数字]        跳转到指定页\n");
-    printf("  q             退出\n");
+// 读取一行输入（去除换行符）
+static void read_line(char *buf, int size) {
+    if (fgets(buf, size, stdin) == NULL) {
+        buf[0] = '\0';
+        return;
+    }
+    
+    // 去掉换行符
+    int len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') {
+        buf[len-1] = '\0';
+    }
+    if (len > 1 && buf[len-2] == '\r') {
+        buf[len-2] = '\0';
+    }
+}
+
+// 交互式配置筛选条件
+static void configure_filter_interactive(FilterOptions *filter) {
+    char buf[256];
+    
+    printf("\n============= 配置筛选条件 =============\n");
+    printf("直接回车表示不设置该条件\n\n");
+    
+    // 协议
+    printf("协议筛选 (tcp/udp/icmp, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (strcmp(buf, "tcp") == 0 || strcmp(buf, "TCP") == 0) {
+        filter->protocol = 6;
+    } else if (strcmp(buf, "udp") == 0 || strcmp(buf, "UDP") == 0) {
+        filter->protocol = 17;
+    } else if (strcmp(buf, "icmp") == 0 || strcmp(buf, "ICMP") == 0) {
+        filter->protocol = 1;
+    }
+    
+    // 源 IP
+    printf("源 IP (例如 192.168.*, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (buf[0] != '\0') {
+        strncpy(filter->src_ip, buf, sizeof(filter->src_ip) - 1);
+    }
+    
+    // 目的 IP
+    printf("目的 IP (例如 192.168.*, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (buf[0] != '\0') {
+        strncpy(filter->dst_ip, buf, sizeof(filter->dst_ip) - 1);
+    }
+    
+    // 源端口
+    printf("源端口 (例如 1234, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (buf[0] != '\0') {
+        filter->src_port = atoi(buf);
+    }
+    
+    // 目的端口
+    printf("目的端口 (例如 80, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (buf[0] != '\0') {
+        filter->dst_port = atoi(buf);
+    }
+    
+    // 任意方向端口
+    printf("任意方向端口 (例如 443, 回车跳过): ");
+    read_line(buf, sizeof(buf));
+    if (buf[0] != '\0') {
+        filter->port = atoi(buf);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -34,79 +83,61 @@ int main(int argc, char *argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     const char *filename = NULL;
-    FilterOptions filter = {0};
+    FilterOptions filter;
     int page_size = 20;
-    int i;
-
+    char buf[256];
+    
     // 初始化筛选选项
     init_filter(&filter);
-
-    // 解析命令行参数
-    for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
-            filename = argv[++i];
-        } else if (strcmp(argv[i], "-tcp") == 0) {
-            filter.protocol = 6;
-        } else if (strcmp(argv[i], "-udp") == 0) {
-            filter.protocol = 17;
-        } else if (strcmp(argv[i], "-icmp") == 0) {
-            filter.protocol = 1;
-        } else if (strcmp(argv[i], "-src") == 0 && i + 1 < argc) {
-            strncpy(filter.src_ip, argv[++i], sizeof(filter.src_ip) - 1);
-        } else if (strcmp(argv[i], "-dst") == 0 && i + 1 < argc) {
-            strncpy(filter.dst_ip, argv[++i], sizeof(filter.dst_ip) - 1);
-        } else if (strcmp(argv[i], "-sport") == 0 && i + 1 < argc) {
-            filter.src_port = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-dport") == 0 && i + 1 < argc) {
-            filter.dst_port = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
-            filter.port = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-size") == 0 && i + 1 < argc) {
-            page_size = atoi(argv[++i]);
-            if (page_size < 1) page_size = 1;
-        } else if (strcmp(argv[i], "-h") == 0) {
-            print_help(argv[0]);
-            return 0;
-        } else {
-            printf("未知选项: %s\n", argv[i]);
-            print_help(argv[0]);
-            return 1;
-        }
-    }
-
-    // 检查是否指定了文件
-    if (filename == NULL) {
-        printf("错误: 请使用 -f 选项指定 pcap 文件\n");
-        print_help(argv[0]);
+    
+    printf("========================================\n");
+    printf("    Pcap 数据包分析工具\n");
+    printf("========================================\n\n");
+    
+    // 询问文件名
+    printf("请输入 pcap 文件路径 (例如: traffic.pcap): ");
+    read_line(buf, sizeof(buf));
+    filename = strdup(buf);
+    
+    if (filename == NULL || filename[0] == '\0') {
+        printf("错误: 未提供文件名\n");
         return 1;
     }
-
+    
+    // 询问是否配置筛选
+    printf("\n是否配置筛选条件？(y/n, 默认 n): ");
+    read_line(buf, sizeof(buf));
+    if (strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0) {
+        configure_filter_interactive(&filter);
+    }
+    
     // 创建上下文并扫描文件
-    printf("正在扫描文件: %s...\n", filename);
+    printf("\n正在扫描文件: %s...\n", filename);
     PcapContext *ctx = pcap_create_context(filename, &filter);
     if (!ctx) {
         printf("错误: 内存不足\n");
         return 1;
     }
-
+    
     if (pcap_scan_file(ctx) != 0) {
         pcap_free_context(ctx);
         return 1;
     }
-
+    
     printf("扫描完成，共 %d 个数据包\n\n", ctx->count);
-
+    
     if (ctx->count == 0) {
         printf("没有找到数据包\n");
         pcap_free_context(ctx);
         return 0;
     }
-
+    
     // 交互式查看
     pcap_interactive_view(ctx, page_size);
-
+    
     // 清理
     pcap_free_context(ctx);
-
+    free((void*)filename);
+    
     return 0;
 }

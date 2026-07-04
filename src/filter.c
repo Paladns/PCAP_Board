@@ -1,5 +1,35 @@
 #include "filter.h"
 #include <string.h>
+#include <stdio.h>
+
+// 通配符匹配函数：支持 *
+static int wildcard_match(const char *pattern, const char *str) {
+    const char *p = pattern;
+    const char *s = str;
+    const char *star = NULL;
+    const char *match = NULL;
+    
+    while (*s) {
+        if (*p == '*') {
+            star = p++;
+            match = s;
+        } else if (*p == *s || *p == '?') {
+            p++;
+            s++;
+        } else if (star) {
+            p = star + 1;
+            s = ++match;
+        } else {
+            return 0;
+        }
+    }
+    
+    while (*p == '*') {
+        p++;
+    }
+    
+    return *p == '\0';
+}
 
 // 初始化筛选条件
 void init_filter(FilterOptions *filter) {
@@ -18,13 +48,13 @@ int matches_filter(const PacketInfo *packet, const FilterOptions *filter) {
         return 0;
     }
     
-    // 源 IP 筛选
-    if (filter->src_ip[0] != '\0' && strcmp(packet->src_ip, filter->src_ip) != 0) {
+    // 源 IP 筛选（支持通配符）
+    if (filter->src_ip[0] != '\0' && !wildcard_match(filter->src_ip, packet->src_ip)) {
         return 0;
     }
     
-    // 目的 IP 筛选
-    if (filter->dst_ip[0] != '\0' && strcmp(packet->dst_ip, filter->dst_ip) != 0) {
+    // 目的 IP 筛选（支持通配符）
+    if (filter->dst_ip[0] != '\0' && !wildcard_match(filter->dst_ip, packet->dst_ip)) {
         return 0;
     }
     
