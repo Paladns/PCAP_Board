@@ -15,6 +15,21 @@
 
 #define INITIAL_CAPACITY 1000
 
+// 我们直接存储匹配的完整数据包信息（带原包号）
+typedef struct {
+    PacketInfo info;
+    int original_id;
+} CachedPacket;
+
+// 修改上下文：存储缓存的数据包而不是索引
+typedef struct {
+    char *filename;
+    CachedPacket *packets;   // 缓存的数据包数组
+    int count;               // 匹配的数据包数
+    int capacity;            // 数组容量
+    FilterOptions *filter;
+} PcapContextInternal;
+
 // 打印表头
 static void print_header() {
     printf("%-8s %-20s %-22s %-22s %-10s %-8s %s\n",
@@ -23,7 +38,7 @@ static void print_header() {
 }
 
 // 打印数据包信息
-static void print_packet(const PacketInfo *info) {
+static void print_packet(const PacketInfo *info, int original_id) {
     char source[64];
     char dest[64];
     char info_str[128];
@@ -53,63 +68,86 @@ static void print_packet(const PacketInfo *info) {
     }
     
     printf("%-8d %-20s %-22s %-22s %-10s %-8u %s\n",
-           info->id, info->timestamp, source, dest,
+           original_id, info->timestamp, source, dest,
            get_protocol_name(info->protocol), info->length, info_str);
 }
 
 // 创建上下文
 PcapContext* pcap_create_context(const char *filename, FilterOptions *filter) {
-    PcapContext *ctx = (PcapContext*)malloc(sizeof(PcapContext));
+    PcapContextInternal *ctx = (PcapContextInternal*)malloc(sizeof(PcapContextInternal));
     if (!ctx) return NULL;
     
     ctx->filename = strdup(filename);
-    ctx->index = (PacketIndex*)malloc(sizeof(PacketIndex) * INITIAL_CAPACITY);
+    ctx->packets = (CachedPacket*)malloc(sizeof(CachedPacket) * INITIAL_CAPACITY);
     ctx->count = 0;
     ctx->capacity = INITIAL_CAPACITY;
     ctx->filter = filter;
     
-    return ctx;
+    return (PcapContext*)ctx;
 }
 
 // 释放上下文
-void pcap_free_context(PcapContext *ctx) {
+void pcap_free_context(PcapContext *ctx_) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
     if (!ctx) return;
     free(ctx->filename);
-    free(ctx->index);
+    free(ctx->packets);
     free(ctx);
 }
 
-// 扩展索引数组容量
-static void expand_capacity(PcapContext *ctx) {
+// 扩展缓存数组容量
+static void expand_capacity(PcapContextInternal *ctx) {
     int new_cap = ctx->capacity * 2;
-    PacketIndex *new_idx = (PacketIndex*)realloc(ctx->index, sizeof(PacketIndex) * new_cap);
-    if (new_idx) {
-        ctx->index = new_idx;
+    CachedPacket *new_packets = (CachedPacket*)realloc(ctx->packets, sizeof(CachedPacket) * new_cap);
+    if (new_packets) {
+        ctx->packets = new_packets;
         ctx->capacity = new_cap;
     }
 }
 
-// 扫描回调：只记录索引，不解析数据包
+// 扫描回调：解析并筛选，保存匹配的包
 static void scan_callback(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
-    PcapContext *ctx = (PcapContext*)user_data;
+    PcapContextInternal *ctx = (PcapContextInternal*)user_data;
+    static int packet_counter = 1;  // 原包号计数器
+    
+    PacketInfo info;
+    struct tm *timeinfo;
+    char time_buf[64];
+    
+    // 解析数据包
+    if (parse_packet(packet, pkthdr->len, &info) != 0) {
+        packet_counter++;
+        return;
+    }
+    
+    // 格式化时间戳
+    time_t ts = pkthdr->ts.tv_sec;
+    timeinfo = localtime(&ts);
+    strftime(time_buf, sizeof(time_buf), "%H:%M:%S", timeinfo);
+    snprintf(info.timestamp, sizeof(info.timestamp), "%s.%06ld", time_buf, (long)pkthdr->ts.tv_usec);
+    
+    // 应用筛选
+    if (ctx->filter && !matches_filter(&info, ctx->filter)) {
+        packet_counter++;
+        return;
+    }
     
     // 检查容量
     if (ctx->count >= ctx->capacity) {
         expand_capacity(ctx);
     }
     
-    // 记录索引
-    // 注意：这里我们无法直接获取文件偏移，所以需要特殊处理
-    // 暂时我们记录时间戳和长度，用位置计数代替
-    ctx->index[ctx->count].file_offset = ctx->count; // 用序号代替
-    ctx->index[ctx->count].length = pkthdr->len;
-    ctx->index[ctx->count].tv_sec = pkthdr->ts.tv_sec;
-    ctx->index[ctx->count].tv_usec = pkthdr->ts.tv_usec;
+    // 保存
+    ctx->packets[ctx->count].info = info;
+    ctx->packets[ctx->count].original_id = packet_counter;
     ctx->count++;
+    
+    packet_counter++;
 }
 
 // 扫描文件并建立索引
-int pcap_scan_file(PcapContext *ctx) {
+int pcap_scan_file(PcapContext *ctx_) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t *handle;
     
@@ -129,74 +167,25 @@ int pcap_scan_file(PcapContext *ctx) {
     return 0;
 }
 
-// 显示范围回调：解析并显示
-typedef struct {
-    int target_start;
-    int target_end;
-    int current;
-    PcapContext *ctx;
-} DisplayState;
-
-static void display_callback(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
-    DisplayState *state = (DisplayState*)user_data;
-    
-    if (state->current >= state->target_start && state->current < state->target_end) {
-        PacketInfo info;
-        struct tm *timeinfo;
-        char time_buf[64];
-        
-        // 解析数据包
-        if (parse_packet(packet, pkthdr->len, &info) != 0) {
-            state->current++;
-            return;
-        }
-        
-        info.id = state->current + 1;
-        
-        // 格式化时间戳
-        time_t ts = pkthdr->ts.tv_sec;
-        timeinfo = localtime(&ts);
-        strftime(time_buf, sizeof(time_buf), "%H:%M:%S", timeinfo);
-        snprintf(info.timestamp, sizeof(info.timestamp), "%s.%06ld", time_buf, (long)pkthdr->ts.tv_usec);
-        
-        // 应用筛选
-        if (state->ctx->filter && !matches_filter(&info, state->ctx->filter)) {
-            state->current++;
-            return;
-        }
-        
-        print_packet(&info);
-    }
-    
-    state->current++;
+// 获取匹配的数据包数量
+int pcap_get_count(PcapContext *ctx_) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
+    return ctx ? ctx->count : 0;
 }
 
 // 读取指定范围的数据包并显示
-int pcap_display_range(PcapContext *ctx, int start, int count) {
-    char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t *handle;
-    DisplayState state;
-    
-    handle = pcap_open_offline(ctx->filename, errbuf);
-    if (handle == NULL) {
-        fprintf(stderr, "无法打开文件 %s: %s\n", ctx->filename, errbuf);
-        return -1;
+int pcap_display_range(PcapContext *ctx_, int start, int count) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
+    int end = start + count;
+    if (end > ctx->count) {
+        end = ctx->count;
     }
     
     print_header();
-    
-    state.target_start = start;
-    state.target_end = start + count;
-    state.current = 0;
-    state.ctx = ctx;
-    
-    if (pcap_loop(handle, 0, display_callback, (u_char*)&state) < 0) {
-        fprintf(stderr, "读取数据包时出错: %s\n", pcap_geterr(handle));
-        pcap_close(handle);
-        return -1;
+    for (int i = start; i < end; i++) {
+        print_packet(&ctx->packets[i].info, ctx->packets[i].original_id);
     }
     
-    pcap_close(handle);
     return 0;
 }
 
@@ -219,7 +208,8 @@ static int get_key() {
 #endif
 
 // 交互式翻页查看
-int pcap_interactive_view(PcapContext *ctx, int page_size) {
+int pcap_interactive_view(PcapContext *ctx_, int page_size) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
     int current_page = 0;
     int total_pages = (ctx->count + page_size - 1) / page_size;
     int key;
@@ -232,14 +222,16 @@ int pcap_interactive_view(PcapContext *ctx, int page_size) {
         
         int start = current_page * page_size;
         int count = page_size;
-        if (start + count > ctx->count) {
-            count = ctx->count - start;
+        int end = start + count;
+        if (end > ctx->count) {
+            end = ctx->count;
+            count = end - start;
         }
         
         printf("=== 第 %d/%d 页 (数据包 %d-%d/%d) ===\n", 
-               current_page + 1, total_pages, start + 1, start + count, ctx->count);
+               current_page + 1, total_pages, start + 1, end, ctx->count);
         
-        pcap_display_range(ctx, start, count);
+        pcap_display_range((PcapContext*)ctx, start, count);
         
         printf("\n操作: n=下一页, p=上一页, [数字]=跳转到页, q=退出\n> ");
         
