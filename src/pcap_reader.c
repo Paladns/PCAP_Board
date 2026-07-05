@@ -15,6 +15,24 @@
 
 #define INITIAL_CAPACITY 1000
 
+// 统计结构
+typedef struct {
+    uint64_t total_bytes;
+    int tcp_count;
+    int udp_count;
+    int icmp_count;
+    int other_count;
+    long first_sec;
+    long first_usec;
+    long last_sec;
+    long last_usec;
+    // 端口统计（简单计数）
+    int port_80;
+    int port_443;
+    int port_53;
+    int port_22;
+} TrafficStats;
+
 // 我们直接存储匹配的完整数据包信息（带原包号）
 typedef struct {
     PacketInfo info;
@@ -28,7 +46,40 @@ typedef struct {
     int count;               // 匹配的数据包数
     int capacity;            // 数组容量
     FilterOptions *filter;
+    TrafficStats stats;      // 流量统计
 } PcapContextInternal;
+
+// 初始化统计
+static void init_stats(TrafficStats *stats) {
+    memset(stats, 0, sizeof(TrafficStats));
+    stats->first_sec = -1;
+}
+
+// 更新统计
+static void update_stats(TrafficStats *stats, const PacketInfo *info, long sec, long usec) {
+    stats->total_bytes += info->length;
+    
+    if (info->protocol == 6) stats->tcp_count++;
+    else if (info->protocol == 17) stats->udp_count++;
+    else if (info->protocol == 1) stats->icmp_count++;
+    else stats->other_count++;
+    
+    // 记录时间跨度
+    if (stats->first_sec == -1 || sec < stats->first_sec) {
+        stats->first_sec = sec;
+        stats->first_usec = usec;
+    }
+    if (sec > stats->last_sec || (sec == stats->last_sec && usec > stats->last_usec)) {
+        stats->last_sec = sec;
+        stats->last_usec = usec;
+    }
+    
+    // 简单的常用端口统计
+    if (info->src_port == 80 || info->dst_port == 80) stats->port_80++;
+    if (info->src_port == 443 || info->dst_port == 443) stats->port_443++;
+    if (info->src_port == 53 || info->dst_port == 53) stats->port_53++;
+    if (info->src_port == 22 || info->dst_port == 22) stats->port_22++;
+}
 
 // 打印表头
 static void print_header() {
@@ -82,6 +133,7 @@ PcapContext* pcap_create_context(const char *filename, FilterOptions *filter) {
     ctx->count = 0;
     ctx->capacity = INITIAL_CAPACITY;
     ctx->filter = filter;
+    init_stats(&ctx->stats);
     
     return (PcapContext*)ctx;
 }
@@ -132,6 +184,9 @@ static void scan_callback(u_char *user_data, const struct pcap_pkthdr *pkthdr, c
         return;
     }
     
+    // 更新统计
+    update_stats(&ctx->stats, &info, pkthdr->ts.tv_sec, pkthdr->ts.tv_usec);
+    
     // 检查容量
     if (ctx->count >= ctx->capacity) {
         expand_capacity(ctx);
@@ -171,6 +226,94 @@ int pcap_scan_file(PcapContext *ctx_) {
 int pcap_get_count(PcapContext *ctx_) {
     PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
     return ctx ? ctx->count : 0;
+}
+
+// 格式化时间跨度
+static void format_duration(long first_sec, long first_usec, long last_sec, long last_usec, char *buf, int buf_size) {
+    if (first_sec == -1) {
+        strncpy(buf, "N/A", buf_size);
+        return;
+    }
+    
+    long total_usec = (last_sec - first_sec) * 1000000LL + (last_usec - first_usec);
+    long total_sec = total_usec / 1000000;
+    
+    int hours = total_sec / 3600;
+    int mins = (total_sec % 3600) / 60;
+    int secs = total_sec % 60;
+    
+    if (hours > 0) {
+        snprintf(buf, buf_size, "%dh %dm %ds", hours, mins, secs);
+    } else if (mins > 0) {
+        snprintf(buf, buf_size, "%dm %ds", mins, secs);
+    } else {
+        snprintf(buf, buf_size, "%d.%03lds", secs, (int)((total_usec % 1000000) / 1000));
+    }
+}
+
+// 格式化字节数
+static void format_bytes(uint64_t bytes, char *buf, int buf_size) {
+    if (bytes >= 1024 * 1024 * 1024) {
+        snprintf(buf, buf_size, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= 1024 * 1024) {
+        snprintf(buf, buf_size, "%.2f MB", bytes / (1024.0 * 1024.0));
+    } else if (bytes >= 1024) {
+        snprintf(buf, buf_size, "%.2f KB", bytes / 1024.0);
+    } else {
+        snprintf(buf, buf_size, "%llu B", (unsigned long long)bytes);
+    }
+}
+
+// 显示流量概览仪表盘
+void pcap_show_stats(PcapContext *ctx_) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
+    TrafficStats *stats = &ctx->stats;
+    char dur_buf[64];
+    char bytes_buf[64];
+    
+    format_duration(stats->first_sec, stats->first_usec, stats->last_sec, stats->last_usec, dur_buf, sizeof(dur_buf));
+    format_bytes(stats->total_bytes, bytes_buf, sizeof(bytes_buf));
+    
+    printf("\n");
+    printf("========================================\n");
+    printf("          流量概览仪表盘\n");
+    printf("========================================\n\n");
+    
+    printf("  总计:\n");
+    printf("    数据包数: %d\n", ctx->count);
+    printf("    字节数:   %s\n", bytes_buf);
+    printf("    时间跨度: %s\n\n", dur_buf);
+    
+    printf("  协议分布:\n");
+    printf("    TCP:   %d\n", stats->tcp_count);
+    printf("    UDP:   %d\n", stats->udp_count);
+    printf("    ICMP:  %d\n", stats->icmp_count);
+    printf("    其他:  %d\n\n", stats->other_count);
+    
+    printf("  常用端口:\n");
+    printf("    80 (HTTP):  %d\n", stats->port_80);
+    printf("    443 (HTTPS):%d\n", stats->port_443);
+    printf("    53 (DNS):   %d\n", stats->port_53);
+    printf("    22 (SSH):   %d\n\n", stats->port_22);
+    
+    printf("========================================\n");
+}
+
+// 等待按键
+void pcap_wait_key() {
+    printf("\n按任意键查看数据包列表...\n");
+#ifdef _WIN32
+    _getch();
+#else
+    struct termios oldt, newt;
+    int ch;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    ch = getchar();
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+#endif
 }
 
 // 读取指定范围的数据包并显示

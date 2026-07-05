@@ -124,13 +124,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    printf("扫描完成，共 %d 个数据包\n\n", ctx->count);
+    printf("扫描完成，共 %d 个数据包\n\n", pcap_get_count(ctx));
     
-    if (ctx->count == 0) {
+    if (pcap_get_count(ctx) == 0) {
         printf("没有找到数据包\n");
         pcap_free_context(ctx);
         return 0;
     }
+    
+    // 显示流量概览
+    pcap_show_stats(ctx);
+    pcap_wait_key();
     
     // 交互式查看
     pcap_interactive_view(ctx, page_size);
