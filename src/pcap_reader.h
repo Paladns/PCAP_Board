@@ -31,4 +31,10 @@ int pcap_display_range(PcapContext *ctx, int start, int count);
 // 交互式翻页查看
 int pcap_interactive_view(PcapContext *ctx, int page_size);
 
+// 标记/取消标记某个包
+void pcap_toggle_mark(PcapContext *ctx, int index);
+
+// 获取某个包的标记状态
+int pcap_is_marked(PcapContext *ctx, int index);
+
 #endif

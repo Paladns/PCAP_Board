@@ -47,6 +47,7 @@ typedef struct {
     int capacity;            // 数组容量
     FilterOptions *filter;
     TrafficStats stats;      // 流量统计
+    int *marked;             // 标记数组：1 表示被标记，0 表示未标记
 } PcapContextInternal;
 
 // 初始化统计
@@ -81,48 +82,6 @@ static void update_stats(TrafficStats *stats, const PacketInfo *info, long sec, 
     if (info->src_port == 22 || info->dst_port == 22) stats->port_22++;
 }
 
-// 打印表头
-static void print_header() {
-    printf("%-8s %-20s %-22s %-22s %-10s %-8s %s\n",
-           "No.", "Time", "Source", "Destination", "Protocol", "Length", "Info");
-    printf("---------------------------------------------------------------------------------------------------------\n");
-}
-
-// 打印数据包信息
-static void print_packet(const PacketInfo *info, int original_id) {
-    char source[64];
-    char dest[64];
-    char info_str[128];
-    char flags_str[64];
-    
-    // 格式化源地址
-    if (info->src_port != 0) {
-        snprintf(source, sizeof(source), "%s:%d", info->src_ip, info->src_port);
-    } else {
-        snprintf(source, sizeof(source), "%s", info->src_ip);
-    }
-    
-    // 格式化目的地址
-    if (info->dst_port != 0) {
-        snprintf(dest, sizeof(dest), "%s:%d", info->dst_ip, info->dst_port);
-    } else {
-        snprintf(dest, sizeof(dest), "%s", info->dst_ip);
-    }
-    
-    // 格式化 Info 字段
-    if (info->protocol == 6) { // TCP
-        get_tcp_flags_str(info->tcp_flags, flags_str, sizeof(flags_str));
-        snprintf(info_str, sizeof(info_str), "[%s]", flags_str);
-    } else {
-        info_str[0] = '-';
-        info_str[1] = '\0';
-    }
-    
-    printf("%-8d %-20s %-22s %-22s %-10s %-8u %s\n",
-           original_id, info->timestamp, source, dest,
-           get_protocol_name(info->protocol), info->length, info_str);
-}
-
 // 创建上下文
 PcapContext* pcap_create_context(const char *filename, FilterOptions *filter) {
     PcapContextInternal *ctx = (PcapContextInternal*)malloc(sizeof(PcapContextInternal));
@@ -130,6 +89,7 @@ PcapContext* pcap_create_context(const char *filename, FilterOptions *filter) {
     
     ctx->filename = strdup(filename);
     ctx->packets = (CachedPacket*)malloc(sizeof(CachedPacket) * INITIAL_CAPACITY);
+    ctx->marked = NULL;
     ctx->count = 0;
     ctx->capacity = INITIAL_CAPACITY;
     ctx->filter = filter;
@@ -144,6 +104,7 @@ void pcap_free_context(PcapContext *ctx_) {
     if (!ctx) return;
     free(ctx->filename);
     free(ctx->packets);
+    free(ctx->marked);
     free(ctx);
 }
 
@@ -219,6 +180,10 @@ int pcap_scan_file(PcapContext *ctx_) {
     }
     
     pcap_close(handle);
+    
+    // 分配标记数组
+    ctx->marked = (int*)calloc(ctx->count, sizeof(int));
+    
     return 0;
 }
 
@@ -228,6 +193,20 @@ int pcap_get_count(PcapContext *ctx_) {
     return ctx ? ctx->count : 0;
 }
 
+// 标记/取消标记某个包
+void pcap_toggle_mark(PcapContext *ctx_, int index) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
+    if (!ctx || !ctx->marked || index < 0 || index >= ctx->count) return;
+    ctx->marked[index] = !ctx->marked[index];
+}
+
+// 获取某个包的标记状态
+int pcap_is_marked(PcapContext *ctx_, int index) {
+    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
+    if (!ctx || !ctx->marked || index < 0 || index >= ctx->count) return 0;
+    return ctx->marked[index];
+}
+
 // 格式化时间跨度
 static void format_duration(long first_sec, long first_usec, long last_sec, long last_usec, char *buf, int buf_size) {
     if (first_sec == -1) {
@@ -235,32 +214,33 @@ static void format_duration(long first_sec, long first_usec, long last_sec, long
         return;
     }
     
-    long total_usec = (last_sec - first_sec) * 1000000LL + (last_usec - first_usec);
-    long total_sec = total_usec / 1000000;
+    long long total_usec = (long long)(last_sec - first_sec) * 1000000LL + (last_usec - first_usec);
+    long long total_sec = total_usec / 1000000;
     
-    int hours = total_sec / 3600;
-    int mins = (total_sec % 3600) / 60;
-    int secs = total_sec % 60;
+    int hours = (int)(total_sec / 3600);
+    int mins = (int)((total_sec % 3600) / 60);
+    int secs = (int)(total_sec % 60);
+    int ms = (int)((total_usec % 1000000) / 1000);
     
     if (hours > 0) {
         snprintf(buf, buf_size, "%dh %dm %ds", hours, mins, secs);
     } else if (mins > 0) {
         snprintf(buf, buf_size, "%dm %ds", mins, secs);
     } else {
-        snprintf(buf, buf_size, "%d.%03lds", secs, (int)((total_usec % 1000000) / 1000));
+        snprintf(buf, buf_size, "%d.%03ds", secs, ms);
     }
 }
 
 // 格式化字节数
 static void format_bytes(uint64_t bytes, char *buf, int buf_size) {
-    if (bytes >= 1024 * 1024 * 1024) {
-        snprintf(buf, buf_size, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= 1024 * 1024) {
-        snprintf(buf, buf_size, "%.2f MB", bytes / (1024.0 * 1024.0));
-    } else if (bytes >= 1024) {
-        snprintf(buf, buf_size, "%.2f KB", bytes / 1024.0);
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+        snprintf(buf, buf_size, "%.2f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL * 1024ULL) {
+        snprintf(buf, buf_size, "%.2f MB", (double)bytes / (1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL) {
+        snprintf(buf, buf_size, "%.2f KB", (double)bytes / 1024.0);
     } else {
-        snprintf(buf, buf_size, "%llu B", (unsigned long long)bytes);
+        snprintf(buf, buf_size, "%u B", (unsigned int)bytes);
     }
 }
 
@@ -316,22 +296,6 @@ void pcap_wait_key() {
 #endif
 }
 
-// 读取指定范围的数据包并显示
-int pcap_display_range(PcapContext *ctx_, int start, int count) {
-    PcapContextInternal *ctx = (PcapContextInternal*)ctx_;
-    int end = start + count;
-    if (end > ctx->count) {
-        end = ctx->count;
-    }
-    
-    print_header();
-    for (int i = start; i < end; i++) {
-        print_packet(&ctx->packets[i].info, ctx->packets[i].original_id);
-    }
-    
-    return 0;
-}
-
 #ifdef _WIN32
 static int get_key() {
     return _getch();
@@ -358,6 +322,9 @@ int pcap_interactive_view(PcapContext *ctx_, int page_size) {
     int key;
     char input[32];
     int input_idx = 0;
+    int in_mark_mode = 0;
+    int mark_input_idx = 0;
+    char mark_input[8];
     
     while (1) {
         // 清屏（简单的输出换行）
@@ -374,26 +341,90 @@ int pcap_interactive_view(PcapContext *ctx_, int page_size) {
         printf("=== 第 %d/%d 页 (数据包 %d-%d/%d) ===\n", 
                current_page + 1, total_pages, start + 1, end, ctx->count);
         
-        pcap_display_range((PcapContext*)ctx, start, count);
-        
-        printf("\n操作: n=下一页, p=上一页, [数字]=跳转到页, q=退出\n> ");
-        
-        input_idx = 0;
-        while (1) {
-            key = get_key();
+        // 显示数据包（带行号用于标记）
+        printf("    %-2s %-8s %-20s %-22s %-22s %-10s %-8s %s\n",
+               "M", "No.", "Time", "Source", "Destination", "Protocol", "Length", "Info");
+        printf("    -----------------------------------------------------------------------------------------------------------------\n");
+        for (int i = start; i < end; i++) {
+            CachedPacket *pkt = &ctx->packets[i];
+            char source[64];
+            char dest[64];
+            char info_str[128];
+            char flags_str[64];
             
+            if (pkt->info.src_port != 0) {
+                snprintf(source, sizeof(source), "%s:%d", pkt->info.src_ip, pkt->info.src_port);
+            } else {
+                snprintf(source, sizeof(source), "%s", pkt->info.src_ip);
+            }
+            if (pkt->info.dst_port != 0) {
+                snprintf(dest, sizeof(dest), "%s:%d", pkt->info.dst_ip, pkt->info.dst_port);
+            } else {
+                snprintf(dest, sizeof(dest), "%s", pkt->info.dst_ip);
+            }
+            if (pkt->info.protocol == 6) {
+                get_tcp_flags_str(pkt->info.tcp_flags, flags_str, sizeof(flags_str));
+                snprintf(info_str, sizeof(info_str), "[%s]", flags_str);
+            } else {
+                info_str[0] = '-';
+                info_str[1] = '\0';
+            }
+            
+            printf("%2d. %-2s %-8d %-20s %-22s %-22s %-10s %-8u %s\n",
+                   (i - start + 1),
+                   ctx->marked[i] ? "*" : " ",
+                   pkt->original_id, pkt->info.timestamp, source, dest,
+                   get_protocol_name(pkt->info.protocol), pkt->info.length, info_str);
+        }
+        
+        // 操作提示
+        if (in_mark_mode) {
+            printf("\n标记模式：输入 %d-%d 中的行号标记/取消标记，按 Enter 结束\n> ", 1, count);
+            for (int i = 0; i < mark_input_idx; i++) printf("%c", mark_input[i]);
+        } else {
+            printf("\n操作：n=下一页，p=上一页，[数字]=跳转到页，m=标记模式，q=退出\n> ");
+            for (int i = 0; i < input_idx; i++) printf("%c", input[i]);
+        }
+        
+        // 获取按键
+        key = get_key();
+        
+        if (in_mark_mode) {
+            // 标记模式处理
+            if (key == '\r' || key == '\n') {
+                if (mark_input_idx > 0) {
+                    mark_input[mark_input_idx] = '\0';
+                    int line_num = atoi(mark_input);
+                    if (line_num >= 1 && line_num <= count) {
+                        int idx = start + line_num - 1;
+                        ctx->marked[idx] = !ctx->marked[idx];
+                    }
+                }
+                in_mark_mode = 0;
+                mark_input_idx = 0;
+            } else if (key == '\b' && mark_input_idx > 0) {
+                mark_input_idx--;
+            } else if (key >= '0' && key <= '9' && mark_input_idx < 7) {
+                mark_input[mark_input_idx++] = key;
+            }
+        } else {
+            // 普通模式处理
             if (key == 'q' || key == 'Q') {
                 return 0;
             } else if (key == 'n' || key == 'N' || key == ' ') {
                 if (current_page < total_pages - 1) {
                     current_page++;
                 }
-                break;
+                input_idx = 0;
             } else if (key == 'p' || key == 'P') {
                 if (current_page > 0) {
                     current_page--;
                 }
-                break;
+                input_idx = 0;
+            } else if (key == 'm' || key == 'M') {
+                in_mark_mode = 1;
+                mark_input_idx = 0;
+                input_idx = 0;
             } else if (key == '\r' || key == '\n') {
                 if (input_idx > 0) {
                     input[input_idx] = '\0';
@@ -402,10 +433,11 @@ int pcap_interactive_view(PcapContext *ctx_, int page_size) {
                         current_page = page;
                     }
                 }
-                break;
+                input_idx = 0;
+            } else if (key == '\b' && input_idx > 0) {
+                input_idx--;
             } else if (key >= '0' && key <= '9' && input_idx < 30) {
                 input[input_idx++] = key;
-                printf("%c", key);
             }
         }
     }
