@@ -82,7 +82,7 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
-    const char *filename = NULL;
+    char filename[512];
     FilterOptions filter;
     int page_size = 20;
     char buf[256];
@@ -94,12 +94,10 @@ int main(int argc, char *argv[]) {
     printf("    Pcap 数据包分析工具\n");
     printf("========================================\n\n");
     
-    // 询问文件名
-    printf("请输入 pcap 文件路径 (例如: traffic.pcap): ");
-    read_line(buf, sizeof(buf));
-    filename = strdup(buf);
-    
-    if (filename == NULL || filename[0] == '\0') {
+    // 获取文件名
+    printf("请输入 pcap 文件名: ");
+    read_line(filename, sizeof(filename));
+    if (filename[0] == '\0') {
         printf("错误: 未提供文件名\n");
         return 1;
     }
@@ -141,7 +139,5 @@ int main(int argc, char *argv[]) {
     
     // 清理
     pcap_free_context(ctx);
-    free((void*)filename);
-    
     return 0;
 }
